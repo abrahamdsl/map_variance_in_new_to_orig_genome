@@ -51,7 +51,7 @@ sub convert_BioDBSeqFeature_To_Hash
   my $counter = 1;
   my $updateEvery = 0;
 
-=consider-in-the-future
+=doc #consider-in-the-future
   if ( scalar(@features) < 1 ){
     print "[error] " . localtime() . " sub convert_BioDBSeqFeature_To_Hash: Features array has no content!\n\n";
     exit (1);
