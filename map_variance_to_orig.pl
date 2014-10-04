@@ -33,6 +33,7 @@ use generalUtilities;
 # Contains the activity-centric common subroutines. Make sure, it is always synced with 
 #   https://github.com/abrahamdsl/blast_and_infer_subfeatures/blob/master/InferAnnotationUtilities.pm
 use InferAnnotationUtilities;
+use Blast6BestResultsUtilities;
 
 # Debugging levels
 # 0 - no
@@ -54,6 +55,8 @@ my $databaseHost = 'localhost';
 # benchmarking!
 my $benchmark_grandStart = new Benchmark;
 
+# Describes shortly what the features are about. Should be min length of 1.
+my $datasetTag = '';
 
 # This is the number added to the left and right of the variance (i.e. SNPs) so that we will have 
 # a BLAST-able sequence. Default 100
@@ -67,6 +70,10 @@ my $newSourceName = '.';
 
 # return destination of GetOptions(), for parameter processing
 my $opt_success;
+
+# some tag to be assigned to files outputted by this program
+# generator sourced from http://stackoverflow.com/questions/801347/how-should-i-generate-a-random-alphanumeric-initial-password-for-new-users
+my $programTag = join '', map +(0..9,'A'..'Z')[rand(10+26*2)], 1..8;
 
 # The original genome and its related variables.
 my $communism;
@@ -86,21 +93,27 @@ my %fascistFeatures;
 # The ultimate file we want
 my $finalOutputFileName;
 
+# Counters, in loops
+my $ax;
+my $bx;
 
 # start procedures ...
 splash();
 $opt_success = GetOptions(
   'help' => \$help,
+  'string_tag=s' => \$datasetTag,
   'genome1=s' => \$communism,
   'genome2=s' => \$fascism,
   'gff1=s' => \$communismGFF,
   'gff2=s' => \$fascismAnnotation,
   'endbuffer=s' => \$endBuffer,
   'debug=s' => \$debug,
-  'newsource=s' => \$newSourceName
+  'dsn=s' =>\$databaseName,
+  'newsource=s' => \$newSourceName 
 );
 die guide() if ( $help || ! $opt_success );
 $benchmark_grandStart = new Benchmark;
+handle_message( 'NOTICE', 'Info', "Run ID : $programTag" );
 handle_message( 'NOTICE', 'File Open', "Opening genome1 : $communism ...");
 handle_message( 'FATAL', 'cannot_open_file', $communism ) unless open( $communismHandle, $communism );
 handle_message( 'NOTICE', 'File Open', "Opening genome2 : $fascism ...");
@@ -117,11 +130,135 @@ $communismDBHandle = loadBioDBSeqFeature( $communism, $communismGFF );
 ##  cancel that  -  										# Oops, cancel that, let's concentrate on using the internal type.
 if ( isGFF3File( $fascismAnnotation ) ) {
    handle_message( 'DEBUG', 'debug', "$fascismAnnotation is GFF3" );
+   handle_message( 'FATAL', 'debug', "GFF3 not yet supported. Program exiting." );
 }else{
    handle_message( 'DEBUG', 'debug', "$fascismAnnotation is not GFF3. Might be internal" );
    %fascistFeatures =  %{ loadInternalVK_SIMP_1( $fascismAnnotation ) };
-   hanlde_message( 'FATAL', 'debug', "Sorry, $fascismAnnotation needs to be GFF3. Please run the accompanying conversion tool." );
+#   hanlde_message( 'FATAL', 'debug', "Sorry, $fascismAnnotation needs to be GFF3. Please run the accompanying conversion tool." );
 }
+
+# Load new genome, without its annotation, it's not that important anyway
+$fascismDBHandle = loadBioDBSeqFeature( $fascism, '' );
+
+# Now iterate throughout each variance
+$ax = 0;
+my $blastDBIndexCMD = 'makeblastdb -dbtype nucl -in ';
+my $blastCommand = "blastn -task blastn -num_threads 8 -outfmt 6 ";
+foreach my $hashKey ( sort keys %fascistFeatures ) {
+  my %bestResult;
+  my %thisVariance = $fascistFeatures{ $hashKey };
+  my $thisVarianceBLASTfile; 
+  my $thisVarianceFeatureID;
+  my $thisVarianceFASTA;
+  my $varianceType; 
+
+  # The x-1 to the left and x+ to the right base pairs/sequence of this variance
+  my $blastThisSeq;
+  
+  # Coordinates of the sequence we want to retrieve and BLAST on the old genome.
+  my $seqStart;
+  my $seqEnd;
+
+  # Coordinates on the older genome
+  my $inferredStart;
+  my $inferredEnd;
+
+  $varianceType = ( exists( $thisVariance{ 'pos2' } ) ) ? 'INDEL' : 'SNP';
+
+  $seqStart =  $thisVariance{ 'pos' } - ( $endBuffer - 1 );
+  if ( $seqStart < 0 ) { $seqStart = 0 };
+
+  
+  # We don't know yet how to check if this exceeds length of target (chromosome)
+  $seqEnd = ( $varianceType eq 'INDEL'  ) ?  $thisVariance{ 'pos2' }
+    : $thisVariance{ 'pos' } + $endBuffer;
+
+  # Time to retrieve sequence
+  $blastThisSeq = $fascismDBHandle->fetch_sequence(
+    -seq_id => $thisVariance{ 'ref' },
+    -start => $seqStart,
+    -end =>  $seqEnd
+  );
+  
+  $ax++;
+  
+  # generate feature ID
+  $thisVarianceFeatureID =  constructFeatureID (
+    1, '_', substr( $varianceType, 0, 0 ), $datasetTag, $ax
+  );
+
+  # Generate variance fasta file name.
+  $thisVarianceFASTA = generateVarianceNameFile(
+    $thisVarianceFeatureID,
+    'seq',
+    '.fa'
+  );
+ 
+  # Now write to file
+  writeSingleFASTA(
+    $thisVarianceFASTA,
+    $thisVarianceFeatureID,
+    $blastThisSeq
+  );
+
+  # now index
+  if ( execCommandEx(
+      $blastDBIndexCMD,
+      "Indexing FASTA for $thisVarianceFASTA",
+      "Something went wrong with BLAST indexing"
+    ) != 0
+  ) {
+    handle_message(
+     'FATAL', 
+     'Indexing error',
+     "Cannot index $thisVarianceFASTA, therefore can't proceed" );
+  }
+
+  # generate BLAST 6 results file
+  $thisVarianceBLASTfile = generateVarianceNameFile(
+    $thisVarianceFeatureID,
+    'blastresult',
+    '.tmp'
+  );
+
+  # then blast
+  if ( execCommandEx(
+      $blastCommand . "-query $thisVarianceFASTA -db $communism > $thisVarianceBLASTfile",
+       "BLAST process launched ", " Something went wrong with BLAST!"
+    ) != 0
+  ) {
+     handle_message( 'FATAL', 'BLASTn Error', 'Something went wrong with BLAST' );
+     exit(2);
+  }
+
+  # Parse results
+  %bestResult = parseBLAST6Results( $thisVarianceBLASTfile, $thisVarianceFeatureID, 0 );  
+  
+  if ( ! keys %bestResult ) {
+    handle_message(
+      'ERROR',
+      'Blast 404',
+      'Return 404 from parseBLAST6Results(), no BLAST match for ' . $thisVarianceFeatureID . '?'
+    );
+    next;
+  }else{
+    if( $bestResult{ 'target_start' } < 0 or $bestResult{ 'target_end' } < 0 ) {
+      handle_message(
+        'ERROR',
+        'BLAST ERROR',
+        "No BLAST results at all for $thisVarianceFeatureID :'( "
+      );
+    }else{
+      # We have a match yey!
+      # Now restore to original
+      $inferredStart = $bestResult{ 'target_start' } + ( $endBuffer - 1 );
+      $inferredEnd = $bestResult{ 'target_end' } - $endBuffer;
+
+      # Now, generate GFF3 for that
+      print "[gff3] " .  $bestResult{ 'target' } . " " . $bestResult{ 'target_start' } . " " . $bestResult{ 'target_end' } . "\n";
+    }
+  }
+} # sub
 
 ##test code START
 my @communismGenes = $communismDBHandle->get_features_by_type('gene');
@@ -137,6 +274,75 @@ foreach my $hashKey (@queryFeatureKeys2) {
 #
 # end of main, start of subroutines
 #
+
+sub constructFeatureID {
+=doc
+  @devnote Sourced from https://github.com/abrahamdsl/vcf_to_gff3/blob/master/vcf_to_gff3.pl as of 03OCT2014-1046
+    Please have this moved to a new library, perhaps a "InferVarianceUtilities.pm" 
+    or BioDBSeqFeatureUtilities.pm ?
+  Constructs the appropriate feature ID for the feature concerned.
+  
+  Arguments:
+    0 - int. Use simple names or not?
+    1 - string. Separator, if applicable.
+    2 - string. "I" or "S" or "" ( indel, SNP, none )
+    3 - string. Data set tag
+    4 - int. The ordinal number of this feature
+    5 - string. Source of the feature ( VCF 2nd column, 1-index)
+  Returns:
+    String. The constructed feature ID.
+=cut
+  if ( $_[0] ) {
+    return $_[3] . $_[1] . $_[2] .  $_[4];
+  }else{
+    return $_[5] . $_[1] . $_[2] . $_[3] . $_[4];
+  }
+} # sub
+
+sub execCommandEx {
+=doc
+  @devnote Sourced from https://raw.githubusercontent.com/abrahamdsl/blast_and_infer_subfeatures/master/blast_and_infer_genes_and_subfeatures.pl
+  A subroutine to execute outside programs.
+
+  Arguments:
+  0 - string. Required. The command (and arguments to execute).
+  1 - string. Required. Message to output upon start of execution.
+  2 - string. Optional. Message to output upon execution error.
+=cut
+ my $pidx;
+ my $executeCommand = $_[0];
+ my $executeStartMsg = $_[1];
+ my $executeErrMsg  =  ! defined $_[2]  ?  $_[2] : 'Execution error.\n';
+ 
+ eval {
+   $pidx = fork || exec $executeCommand;
+   handle_message( 'NOTICE', $executeStartMsg . ' | PID ' . $pidx, '' );
+ };
+ if ($?){
+   handle_message( 'ERROR', $executeErrMsg  . ' | PID ' . $pidx , '' );
+   return $?;
+ }
+ waitpid( $pidx, 0 );
+ 
+ return 0;
+} #sub
+
+sub generateVarianceNameFile {
+=doc
+   Generates the approriate file name for the variance in question.
+ 
+   Arguments:
+     0 - string. A plausible feature ID, returned by constructFeatureID(..)
+     1 - string. Short description of the file.
+     2 - string. Extension. It can be '.fa', '.gff3' for FASTA and GFF3 An-
+       notation formats respectively
+
+   Returns:
+     String. The generated file name.
+=cut
+  return "_tmp_$programTag" . "_$_[1]" . '_' . $_[0] . $_[2];
+} # sub
+
 sub getSingleNonSharpLineFromFile {
 =doc
   Gets the chomp()-ped, first non-comment line of a text file, where the comment indicator is a #,
@@ -173,14 +379,18 @@ sub guide {
   $0 [options]
 
   Options:
-  --endbuffer Optional. Number of extra bases to include from left and end of gene sequence in original. Default $endBuffer.
-  --genome1   Required. The original genome, in FASTA format.
-  --genome2   Required. The newly created genome (the one you're generating a new annotation for), in FASTA format.
-  --gff1      Required. The GFF3 for --genome1. The subfeatures are required too. As in, complete.
-  --gff2      Required. For --genome2.
+  --endbuffer  Optional. Number of extra bases to include from left and end of gene sequence in original. Default $endBuffer.
+  --string_tag Required. A string of minlength 1 to describe the GFF3-able data that will be generated.
+  --genome1    Required. The original genome, in FASTA format.
+  --genome2    Required. The newly created genome (the one you're generating a new annotation for), in FASTA format.
+  --gff1       Required. The GFF3 for --genome1. The subfeatures are required too. As in, complete.
+  --gff2       Required. For --genome2.
                  Can be GFF3 or internal format ( insider tag: VK_SIMP_1 )
-  --newsource Optional. Specify if we have to have a new source to be put in the GFF3 column 2 (1-based indexing).
-                If not specified, uses the original source as specified in --gff1
+  --dsn        Required. The MySQL database name for BLAST 6 results filtering.
+  --newsource  Optional. Specify if we have to have a new source to be put in the GFF3 column 2 (1-based indexing).
+                 If not specified, uses the original source as specified in --gff1
+
+  Ex: $0 --endbuffer=100 -string_tag=rand --dsn=taskXXX ...
   ";
 } # sub
 
@@ -213,12 +423,17 @@ sub loadBioDBSeqFeature {
 =cut
   my $genomicDB_handle;
 
-  eval {
-    $genomicDB_handle = Bio::DB::SeqFeature::Store->new( 
-      -adaptor => 'memory',
-      -fasta   => $_[0],
-      -gff     => $_[1]
-    );    
+  eval {    
+    $genomicDB_handle = ( $_[1] ne '' ) ?  Bio::DB::SeqFeature::Store->new( 
+        -adaptor => 'memory',
+        -fasta   => $_[0],
+        -gff     => $_[1]
+      ) 
+      :
+      Bio::DB::SeqFeature::Store->new(
+        -adaptor => 'memory',
+        -fasta   => $_[0]
+    );          
   };
 
   if ( $@ ) {
@@ -272,8 +487,38 @@ sub loadInternalVK_SIMP_1 {
   return \%hushHash;
 } # sub
 
+sub writeSingleFASTA {
+=doc
+  Writes to a text file, FASTA sequence of only a single feature.
+
+  Arguments:
+    0 - string. File name to write.
+    1 - string. Feature name.
+    2 - string. The DNA/protein sequence.
+
+  Returns:
+    0  - on success
+    -1 - any failure   
+=cut
+  my $fileHandle;
+  my $failureDispatch = {
+    'default' => sub {
+      handle_message( 'ERROR', 'File open', "Cannot open $_[0]" );
+      return -1;
+    }
+  };
+
+  open ( $fileHandle, $_[0] ) or return $failureDispatch->{ 'default' }->();
+  print $fileHandle '>' . $_[1] . "\n";
+  print $fileHandle $_[2] . "\n";
+  close $fileHandle;
+
+  return 0;
+} #sub
+
 sub splash {
   print "\nVariance Mapper to Original Genome Script\n";
   print "a.llave\@irri.org 01OCT2014-1654\n";
   print "---------------------------------------------\n\n";
 }
+

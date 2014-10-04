@@ -6,7 +6,25 @@
 
 require Exporter;
 @ISA = qw(Exporter);
-#@EXPORT;
+@EXPORT = qw(handle_message);
+
+sub getFileNumLines {
+=doc
+  @devnote Sourced from https://raw.githubusercontent.com/abrahamdsl/blast_and_infer_subfeatures/master/blast_and_infer_genes_and_subfeatures.pl
+
+  Arguments:
+    0 - string. The filename of the file.
+ 
+  Returns:
+    int. The number of lines in a file. 
+=cut
+  my $lines = 0;
+  my $fileHandle;
+  open ( $fileHandle, $_[0] ) or die('ERROR',"Can't open $_[0] for line number checking!");
+  $lines++ while( <$fileHandle> );
+  close $fileHandle;
+  return $lines;
+} # getFileNumLines
 
 sub handle_message {
 =doc
