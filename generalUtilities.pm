@@ -8,6 +8,30 @@ require Exporter;
 @ISA = qw(Exporter);
 @EXPORT = qw(handle_message);
 
+sub ConnectToMySql {
+=doc
+  Used for connecting to MySQL database.
+  Disclaimer: This function was sourced from somewhere else, I forgot where. All credits go to
+  original poster.
+  Arguments
+  0 - database name
+  Returns
+  DBI object for MySQL connection.
+=cut
+  my ($db) = @_;
+
+  # assign the values in the accessDB file to the variables
+  my $host = "localhost";
+  my $userid = "root";
+  my $passwd = "e\$nodenpri\$m";
+  # assign the values to your connection variable
+  my $connectionInfo="dbi:mysql:$db;$host";
+  # make connection to database
+  my $l_connection = DBI->connect($connectionInfo,$userid,$passwd);
+  # the value of this connection is returned by the sub-routine
+  return $l_connection;
+} # Sub
+
 sub getFileNumLines {
 =doc
   @devnote Sourced from https://raw.githubusercontent.com/abrahamdsl/blast_and_infer_subfeatures/master/blast_and_infer_genes_and_subfeatures.pl

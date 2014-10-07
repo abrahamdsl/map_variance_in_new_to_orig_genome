@@ -48,23 +48,25 @@ sub insertBLAST6ToMySQL {
     and changed as needed.
   Populates our main table in our own-devised MySQL database for BLAST 6 results manipulation.
  
-  Arguments:
-    0 - string. The table name.
-    1 - reference to a HASH. The hash contains the BLAST matches, and whose keys are the line numbers
+  Arguments:   
+    0 - string. The dtabase name.
+    1 - string. The table name.
+    2 - reference to a HASH. The hash contains the BLAST matches, and whose keys are the line numbers
       from BLAST outfmt 6 results file.
 
   Returns:
     Nothing
 =cut
-  my $connection = ConnectToMySql( $databaseName ); # argument is a global var
+  my $connection = ConnectToMySql( $_[0] );  
   my $query;
-  my %resultsHash = %{ $_[1] };
+  my %resultsHash = %{ $_[2] };
   my $statement;
-
-  $query = "INSERT INTO `$_[0]` (`id`,`query_label`,`target`,`percent_identity`,`alignment_length`,`mismatch`,`gap`,";
+  print join ( ' ', @_, "\n" );
+ 
+  $query = "INSERT INTO `$_[1]` (`id`,`query_label`,`target`,`percent_identity`,`alignment_length`,`mismatch`,`gap`,";
   $query .= "`query_start`,`query_end`,`target_start`,`target_end`,`evalue`,`bitscore`)";
-  $query .= "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?);";
-  $statement = $connection->prepare( "TRUNCATE TABLE `$_[0]`;" );
+  $query .= "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?);";  
+  $statement = $connection->prepare( "TRUNCATE TABLE `$_[1]`;" );
   $statement->execute();
   foreach my $lineNum ( sort keys %resultsHash ) {
     my %localHash = %{  $resultsHash{ $lineNum } };
@@ -98,6 +100,8 @@ sub parseBLAST6Results {
     2 - int. The zero-index, i-th time this function was called for the particular feature. 
           Useful for re-BLASTing short sequences where there were no results in the regular BLAST 
           (with default parameters).
+    3 - string. The database name for BLAST6 results filtering.
+    4 - string. The table name for the blast6 results.
 
   Returns:
     Hash accessed by BLAST6/Table labels
@@ -112,8 +116,9 @@ sub parseBLAST6Results {
   my %thatHash;
   my $lineCount = getFileNumLines( $_[0] );
   my $featureName = $_[1];
-  my $timesCalled = $_[2];
+  my $timesCalled = $_[2]; 
 
+  print '[debug]' . join( ' ' , @_, "\n" );
 # Is result just one line?
   if ( $lineCount == 1 ) {
     return %{
@@ -139,10 +144,10 @@ sub parseBLAST6Results {
     }
     close( $fileHandle );
     # insert into database for easier selection
-    insertBLAST6ToMySQL( $blast6Table , \%theResults );
+    insertBLAST6ToMySQL( $_[3] , $_[4], \%theResults );
     # We reuse $x !
     # Now eventually filter matches according to our criteria, progressively
-    $x =  searchBestBLAST6Match( 0, $featureName, \@arraytemp, '', '' ); 
+    $x =  searchBestBLAST6Match( 0, $featureName, \@arraytemp, '', $_[3], $_[4] ); 
     if ( $x == -1 ) {
       handle_message('ERROR', 'No suitable BLAST match found for ' . $featureName, '' );
     } 
@@ -165,12 +170,12 @@ sub searchBestBLAST6Match{
   my $recursionLevel = $_[0] ;
   my $geneName = $_[1];  
   my @previousValues = @{ $_[2] };
-  my $previousQuerySpecific = $_[3];
-  my $previousTable = $_[4];   
+  my $previousQuerySpecific = $_[3];  
+  my $previousTable = $_[5];   
   my $sqlQueryOrderBy; 
   my $sqlQuerySpecific;
   my $dispatchTable;
-  my $connection = ConnectToMySql($database);
+  my $connection = ConnectToMySql($_[4]);
   my $statement;
   my $thisRecursionFeaturedValue;
   my $thisRecursionFeaturedColumn;
@@ -182,8 +187,8 @@ sub searchBestBLAST6Match{
     0 => sub {
        $thisTempTable = "lessstrict_0";
        $thisRecursionFeaturedColumn = 'evalue';
-       $previousTable = $blast6Table;
-       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM `$blast6Table` ORDER BY `$thisRecursionFeaturedColumn`;";
+#       $previousTable = $blast6Table;
+       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable ORDER BY `$thisRecursionFeaturedColumn`;";
        $sqlQuerySpecific = "SELECT * FROM `specifictable` WHERE `$thisRecursionFeaturedColumn` = ? ";
       },
     1 => sub {
@@ -264,7 +269,7 @@ sub searchBestBLAST6Match{
   }else{
     if ( $recursionLevel < 5 ) {
       if ( $debug > 1) { print "[notice] For $geneName $thisRecursionFeaturedColumn  $thisRecursionFeaturedValue is still not enough. Leveling up...\n"; }
-      $returnThis = searchBestBLAST6Match( $recursionLevel + 1,  $geneName, \@previousValues, $sqlQuerySpecific, $thisTempTable);
+      $returnThis = searchBestBLAST6Match( $recursionLevel + 1,  $geneName, \@previousValues, $sqlQuerySpecific, $_[4], $thisTempTable);
     }else{
        # STill there are more results in the topmost criteria, return the top most
       my $finalRef = $statement3->fetchrow_hashref();

@@ -13,6 +13,7 @@
 use warnings;
 use strict;
 
+
 # For measuring our performance
 use Benchmark;
 use DateTime;
@@ -22,6 +23,9 @@ use Bio::DB::SeqFeature;
 use Bio::DB::SeqFeature::Store;
 use DBD::mysql;
 use DBI;
+
+# For debugging
+use Data::Dumper;
 
 # For parameters
 use Getopt::Long;
@@ -44,6 +48,8 @@ my $debug = 3;
 
 # For BLAST results selection, manipulation
 # Let's forget about the ports for now
+
+# Temporary table to store more than one BLAST 6 results
 my $blast6Table = 'blast6out';
 my $databaseName = '';
 my $databaseUsername = '';
@@ -56,7 +62,7 @@ my $databaseHost = 'localhost';
 my $benchmark_grandStart = new Benchmark;
 
 # Describes shortly what the features are about. Should be min length of 1.
-my $datasetTag = '';
+my $datasetTag = 'null';
 
 # This is the number added to the left and right of the variance (i.e. SNPs) so that we will have 
 # a BLAST-able sequence. Default 100
@@ -101,6 +107,7 @@ my $bx;
 splash();
 $opt_success = GetOptions(
   'help' => \$help,
+  'blasttb=s' => \$blast6Table,
   'string_tag=s' => \$datasetTag,
   'genome1=s' => \$communism,
   'genome2=s' => \$fascism,
@@ -133,7 +140,7 @@ if ( isGFF3File( $fascismAnnotation ) ) {
    handle_message( 'FATAL', 'debug', "GFF3 not yet supported. Program exiting." );
 }else{
    handle_message( 'DEBUG', 'debug', "$fascismAnnotation is not GFF3. Might be internal" );
-   %fascistFeatures =  %{ loadInternalVK_SIMP_1( $fascismAnnotation ) };
+   %fascistFeatures =  loadInternalVK_SIMP_1( $fascismAnnotation ) ;
 #   hanlde_message( 'FATAL', 'debug', "Sorry, $fascismAnnotation needs to be GFF3. Please run the accompanying conversion tool." );
 }
 
@@ -142,16 +149,22 @@ $fascismDBHandle = loadBioDBSeqFeature( $fascism, '' );
 
 # Now iterate throughout each variance
 $ax = 0;
+my $averageTimeSoFar = 0;
+my $remainingTimeSoFar=0;
+my @aliciaKeys = sort keys %fascistFeatures;
+$bx = scalar( @aliciaKeys );
 my $blastDBIndexCMD = 'makeblastdb -dbtype nucl -in ';
 my $blastCommand = "blastn -task blastn -num_threads 8 -outfmt 6 ";
+my $searchProperLoopSecs = 0;
 foreach my $hashKey ( sort keys %fascistFeatures ) {
   my %bestResult;
-  my %thisVariance = $fascistFeatures{ $hashKey };
+  my %thisVariance = %{ $fascistFeatures{ $hashKey } };
   my $thisVarianceBLASTfile; 
   my $thisVarianceFeatureID;
   my $thisVarianceFASTA;
   my $varianceType; 
-
+  my $start_time = new Benchmark;
+#debug  print Dumper %thisVariance;
   # The x-1 to the left and x+ to the right base pairs/sequence of this variance
   my $blastThisSeq;
   
@@ -163,6 +176,9 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   my $inferredStart;
   my $inferredEnd;
 
+  print "[notice] " . localtime() . " Progress " . ($ax + 1) . " \/ $bx " . (($ax+1)/$bx) * 100 ;
+  if ($debug > 0) { print "\n"; }else{ print "\r" };
+
   $varianceType = ( exists( $thisVariance{ 'pos2' } ) ) ? 'INDEL' : 'SNP';
 
   $seqStart =  $thisVariance{ 'pos' } - ( $endBuffer - 1 );
@@ -173,13 +189,13 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   $seqEnd = ( $varianceType eq 'INDEL'  ) ?  $thisVariance{ 'pos2' }
     : $thisVariance{ 'pos' } + $endBuffer;
 
-  # Time to retrieve sequence
+  # Time to retrieve sequence 
   $blastThisSeq = $fascismDBHandle->fetch_sequence(
-    -seq_id => $thisVariance{ 'ref' },
+    -seq_id => $thisVariance{ 'target' },
     -start => $seqStart,
     -end =>  $seqEnd
   );
-  
+#debug  print $blastThisSeq . "\t" .  $thisVariance{ 'target' } . "\t" . $seqStart . "\t" . $seqEnd . "\n";
   $ax++;
   
   # generate feature ID
@@ -195,15 +211,18 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   );
  
   # Now write to file
-  writeSingleFASTA(
-    $thisVarianceFASTA,
-    $thisVarianceFeatureID,
-    $blastThisSeq
-  );
+  if (  writeSingleFASTA(
+     $thisVarianceFASTA,
+     $thisVarianceFeatureID,
+     $blastThisSeq     
+    ) != 0
+  ) {
+    exit 1;
+  }
 
   # now index
   if ( execCommandEx(
-      $blastDBIndexCMD,
+      $blastDBIndexCMD . ' ' . $thisVarianceFASTA,
       "Indexing FASTA for $thisVarianceFASTA",
       "Something went wrong with BLAST indexing"
     ) != 0
@@ -232,7 +251,13 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   }
 
   # Parse results
-  %bestResult = parseBLAST6Results( $thisVarianceBLASTfile, $thisVarianceFeatureID, 0 );  
+  %bestResult = parseBLAST6Results(
+    $thisVarianceBLASTfile,
+    $thisVarianceFeatureID,
+    0,
+    $databaseName,
+    $blast6Table
+  );  
   
   if ( ! keys %bestResult ) {
     handle_message(
@@ -255,12 +280,51 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
       $inferredEnd = $bestResult{ 'target_end' } - $endBuffer;
 
       # Now, generate GFF3 for that
-      print "[gff3] " .  $bestResult{ 'target' } . " " . $bestResult{ 'target_start' } . " " . $bestResult{ 'target_end' } . "\n";
+      my $origSeq  =  $communismDBHandle->fetch_sequence(
+    -seq_id =>  $bestResult{ 'target' },
+    -start => $bestResult{ 'target_start' },
+    -end =>   $bestResult{ 'target_end' }
+  );
+     my $snpx = $blastThisSeq = $communismDBHandle->fetch_sequence(
+    -seq_id =>  $bestResult{ 'target' },
+  -start => $inferredStart,
+  -end => $inferredEnd
+     );
+     my $snp_len =  length( $snpx );
+     if( $snp_len > 1 or $snp_len == 0 ) {
+       print '[error] Top BLAST match for ' . $thisVarianceFeatureID . ' not a SNP! ' . "\n";
+       #next;
+      }else{
+      print '[result] seq=' . ( ( lc($blastThisSeq) eq lc($origSeq) ) ? "eq" : "ne" ) . ' snp=' . ( ( uc($snpx) eq uc( $thisVariance{ 'change' })  )  ?  "no" : "yes" )    .  ' ' . $thisVariance{ 'orig' } . '>' .  $thisVariance{ 'change' } . ' ? ' . $snpx . "\n";
+
+      print '[gff3] ' .    $bestResult{ 'target' } . "\t<source>\tSNP\t" .  $inferredStart . "\t" . $inferredEnd ;
+      print "\t<score>\t<strand>\t<phase>\tID=$thisVarianceFeatureID;Name=$thisVarianceFeatureID;Note=$snpx > " . $thisVariance{ 'change' }  ;
+      print ", AF ";
+      printf("%.2f\n",  $thisVariance{ 'af' } );
+# $thisVariance{ 'pos' } . ' ' .  $thisVariance{ 'orig' } ;
+#      print ' ' .  $bestResult{ 'target' } . " " . $bestResult{ 'target_start' } . " " . $bestResult{ 'target_end' } . "\n";
     }
+  } 
+#=doc 
+  my $end_time = new Benchmark;
+  my $difference = timediff( $end_time, $start_time );
+  my $timeNotif =  "[debug] All processes for gene " . $thisVarianceFeatureID . " took " . timestr( $difference ) . "\n"; 
+  $timeNotif =~ /\s+(\d+)\s+wallclock\s+secs/;
+  $searchProperLoopSecs += $1;
+  $averageTimeSoFar = ( $searchProperLoopSecs / $ax );
+  $remainingTimeSoFar = ( $averageTimeSoFar * ( $bx - $ax ) );
+  if ( $debug > 0 ) { 
+   my $dt = DateTime->now();
+   my $expectedArrival = $dt->add( seconds => $remainingTimeSoFar );
+   print $timeNotif;
+   print "[debug] $ax features took $searchProperLoopSecs for an average of $averageTimeSoFar. Estimated arrival at " . $expectedArrival->datetime() . "\n" ;
+  }
+#=cut
   }
 } # sub
 
 ##test code START
+=doc
 my @communismGenes = $communismDBHandle->get_features_by_type('gene');
 my ($temp_arr_ref2, $queryHashRef2) = convert_BioDBSeqFeature_To_Hash( \@communismGenes, 1 );
 my %queryFeaturesFast2 = %$queryHashRef2;
@@ -269,6 +333,7 @@ foreach my $hashKey (@queryFeatureKeys2) {
   my $obj = $queryFeaturesFast2{ $hashKey };
   print $obj->name . "\n";
 }
+=cut
 ##test code END
 
 #
@@ -379,6 +444,7 @@ sub guide {
   $0 [options]
 
   Options:
+  --blasttb    Optional. The table within --dsn to store blast 6 results. Default `blast6out`.
   --endbuffer  Optional. Number of extra bases to include from left and end of gene sequence in original. Default $endBuffer.
   --string_tag Required. A string of minlength 1 to describe the GFF3-able data that will be generated.
   --genome1    Required. The original genome, in FASTA format.
@@ -473,18 +539,18 @@ sub loadInternalVK_SIMP_1 {
 
     chomp $_; 
     @temparr = split( /\s+/, $_ );
-    $hushHash{ $x } = {
+    $hushHash{ $x } =  {
       'target' => $temparr[0],
       'pos' => $temparr[1],
       'orig' => $temparr[2],
       'change' => $temparr[3],
       'af' => $temparr[4]
-    };
+    } ;
     $x++;
   }
   close( $fileHandle );
-
-  return \%hushHash;
+  #print Dumper %hushHash;
+  return %hushHash;
 } # sub
 
 sub writeSingleFASTA {
@@ -503,12 +569,12 @@ sub writeSingleFASTA {
   my $fileHandle;
   my $failureDispatch = {
     'default' => sub {
-      handle_message( 'ERROR', 'File open', "Cannot open $_[0]" );
+      handle_message( 'ERROR', 'FASTA writing', "Cannot open $_[0]" );
       return -1;
     }
   };
 
-  open ( $fileHandle, $_[0] ) or return $failureDispatch->{ 'default' }->();
+  open ( $fileHandle,"> $_[0]" ) or return $failureDispatch->{ 'default' }->( $_[0] );
   print $fileHandle '>' . $_[1] . "\n";
   print $fileHandle $_[2] . "\n";
   close $fileHandle;
