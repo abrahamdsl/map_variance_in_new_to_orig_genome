@@ -23,7 +23,7 @@ sub ConnectToMySql {
   # assign the values in the accessDB file to the variables
   my $host = "localhost";
   my $userid = "root";
-  my $passwd = "e\$nodenpri\$m";
+  my $passwd = "<password>";
   # assign the values to your connection variable
   my $connectionInfo="dbi:mysql:$db;$host";
   # make connection to database
