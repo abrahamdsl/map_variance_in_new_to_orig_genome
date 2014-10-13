@@ -49,29 +49,33 @@ sub insertBLAST6ToMySQL {
   Populates our main table in our own-devised MySQL database for BLAST 6 results manipulation.
  
   Arguments:   
-    0 - string. The dtabase name.
+    0 - string. The database name.
     1 - string. The table name.
-    2 - reference to a HASH. The hash contains the BLAST matches, and whose keys are the line numbers
+    2 - string. The user for arg 0.
+    3 - string. The password for arg 2.
+    4 - string. The hostname for args 0-3.
+    5 - string. Reference to a HASH. The hash contains the BLAST matches, and whose keys are the line numbers
       from BLAST outfmt 6 results file.
+    6 - string. Program/Run Tag for this process.
 
   Returns:
     Nothing
 =cut
-  my $connection = ConnectToMySql( $_[0] );  
+  my $connection = ConnectToMySql( $_[0], $_[2], $_[3], $_[4] );  
   my $query;
-  my %resultsHash = %{ $_[2] };
+  my %resultsHash = %{ $_[5] };
   my $statement;
-  print join ( ' ', @_, "\n" );
  
-  $query = "INSERT INTO `$_[1]` (`id`,`query_label`,`target`,`percent_identity`,`alignment_length`,`mismatch`,`gap`,";
+  $query = "INSERT INTO `$_[1]` (`run_id`,`id`,`query_label`,`target`,`percent_identity`,`alignment_length`,`mismatch`,`gap`,";
   $query .= "`query_start`,`query_end`,`target_start`,`target_end`,`evalue`,`bitscore`)";
-  $query .= "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?);";  
+  $query .= "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);";  
   $statement = $connection->prepare( "TRUNCATE TABLE `$_[1]`;" );
   $statement->execute();
   foreach my $lineNum ( sort keys %resultsHash ) {
     my %localHash = %{  $resultsHash{ $lineNum } };
     $statement = $connection->prepare( $query );
     $statement->execute(
+      $_[6],
       $lineNum,
       $localHash{ 'query_label' },
       $localHash{ 'target' },
@@ -102,6 +106,10 @@ sub parseBLAST6Results {
           (with default parameters).
     3 - string. The database name for BLAST6 results filtering.
     4 - string. The table name for the blast6 results.
+    5 - string. The username for arg 3.
+    6 - string. The password for arg 3.
+    7 - string. The hostname for arg 3.
+    8 - string. Program Run ID
 
   Returns:
     Hash accessed by BLAST6/Table labels
@@ -118,7 +126,6 @@ sub parseBLAST6Results {
   my $featureName = $_[1];
   my $timesCalled = $_[2]; 
 
-  print '[debug]' . join( ' ' , @_, "\n" );
 # Is result just one line?
   if ( $lineCount == 1 ) {
     return %{
@@ -144,10 +151,29 @@ sub parseBLAST6Results {
     }
     close( $fileHandle );
     # insert into database for easier selection
-    insertBLAST6ToMySQL( $_[3] , $_[4], \%theResults );
+    insertBLAST6ToMySQL( 
+      $_[3],
+      $_[4],
+      $_[5],
+      $_[6],
+      $_[7],
+      \%theResults,
+      $_[8]
+    ); 
     # We reuse $x !
     # Now eventually filter matches according to our criteria, progressively
-    $x =  searchBestBLAST6Match( 0, $featureName, \@arraytemp, '', $_[3], $_[4] ); 
+    $x = searchBestBLAST6Match(
+      0,
+      $featureName,
+      \@arraytemp,
+      '',
+      $_[3],
+      $_[4],
+      $_[5],
+      $_[6],
+      $_[7],
+      $_[8]
+    ); 
     if ( $x == -1 ) {
       handle_message('ERROR', 'No suitable BLAST match found for ' . $featureName, '' );
     } 
@@ -165,17 +191,31 @@ sub searchBestBLAST6Match{
 
  This is a recursive function, progressively filtering out rows. If at the upper level, there are still more than 
  one row, the topmost one will be returned.
- 
+
+ Arguments:
+   0 - int. Recursion level.
+   1 - string. Feature name.
+   2 - Reference to an Array. Array contains the values for SQL selection/fitlering.
+   3 - string. The specific previous query.
+   4 - string. database name.
+   5 - string. Database table containing the previously filtered results.
+   6 - string. User name for arg 4.
+   7 - string. Password for arg 6.
+   8 - string. Host for args 4,6-8.
+   9 - string. Program run tag. 
+
+
 =cut
   my $recursionLevel = $_[0] ;
   my $geneName = $_[1];  
   my @previousValues = @{ $_[2] };
   my $previousQuerySpecific = $_[3];  
   my $previousTable = $_[5];   
+  my $programTag = $_[9];
   my $sqlQueryOrderBy; 
   my $sqlQuerySpecific;
   my $dispatchTable;
-  my $connection = ConnectToMySql($_[4]);
+  my $connection = ConnectToMySql( $_[4], $_[6], $_[7], $_[8] );
   my $statement;
   my $thisRecursionFeaturedValue;
   my $thisRecursionFeaturedColumn;
@@ -188,40 +228,41 @@ sub searchBestBLAST6Match{
        $thisTempTable = "lessstrict_0";
        $thisRecursionFeaturedColumn = 'evalue';
 #       $previousTable = $blast6Table;
-       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable ORDER BY `$thisRecursionFeaturedColumn`;";
-       $sqlQuerySpecific = "SELECT * FROM `specifictable` WHERE `$thisRecursionFeaturedColumn` = ? ";
+       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable WHERE `run_id` = '$programTag' ORDER BY `$thisRecursionFeaturedColumn`;";
+       $sqlQuerySpecific = "SELECT * FROM `specifictable` WHERE `run_id` = '$programTag' AND `$thisRecursionFeaturedColumn` = ? ";
       },
     1 => sub {
        $thisTempTable = "lessstrict_1";
        $thisRecursionFeaturedColumn = 'alignment_length';
-       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable t ORDER BY t.$thisRecursionFeaturedColumn DESC; ";
+       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable t WHERE t.`run_id` = '$programTag' ORDER BY t.$thisRecursionFeaturedColumn DESC; ";
        $sqlQuerySpecific = $previousQuerySpecific . " AND $thisRecursionFeaturedColumn = ? "; 
     },
     2 => sub {
        $thisTempTable = "lessstrict_2";
        $thisRecursionFeaturedColumn = 'percent_identity';
-       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable u ORDER BY u.$thisRecursionFeaturedColumn DESC; ";
+       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable u  WHERE u.`run_id` = '$programTag' ORDER BY u.$thisRecursionFeaturedColumn DESC; ";
        $sqlQuerySpecific =  $previousQuerySpecific . " AND $thisRecursionFeaturedColumn = ? ";
     },
     3 => sub {
        $thisTempTable = "lessstrict_3";
        $thisRecursionFeaturedColumn = 'bitscore';
-       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable v ORDER BY v.$thisRecursionFeaturedColumn DESC; ";
+       $sqlQueryOrderBy = "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable v  WHERE v.`run_id` = '$programTag' ORDER BY v.$thisRecursionFeaturedColumn DESC; ";
        $sqlQuerySpecific =  $previousQuerySpecific . " AND $thisRecursionFeaturedColumn = ? ";
     },
     4 => sub {
        $thisTempTable = "lessstrict_4";
        $thisRecursionFeaturedColumn = 'mismatch';
-       $sqlQueryOrderBy =  "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable w ORDER BY w.$thisRecursionFeaturedColumn; ";
+       $sqlQueryOrderBy =  "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable w  WHERE w.`run_id` = '$programTag' ORDER BY w.$thisRecursionFeaturedColumn; ";
        $sqlQuerySpecific = $previousQuerySpecific . " AND $thisRecursionFeaturedColumn = ? ";
     },
     5 => sub {
        $thisTempTable = "lessstrict_5";
        $thisRecursionFeaturedColumn = 'gap';
-       $sqlQueryOrderBy =  "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable x ORDER BY x.$thisRecursionFeaturedColumn; ";
+       $sqlQueryOrderBy =  "SELECT DISTINCT($thisRecursionFeaturedColumn) FROM $previousTable x  WHERE x.`run_id` = '$programTag' ORDER BY x.$thisRecursionFeaturedColumn; ";
        $sqlQuerySpecific = $previousQuerySpecific . " AND $thisRecursionFeaturedColumn  = ? ";
     },
     6 => sub {
+      # Actually this will not be called, but keeping it here for legacy 
       $thisTempTable = "lessstrict_6";
       print "[fatal] Exhausted all filters for $geneName at recursionLevel $recursionLevel ,still duplicated .. | $previousQuerySpecific \n";
       return "";
@@ -240,7 +281,7 @@ sub searchBestBLAST6Match{
   # Get the topmost row  
   my $rows =  $statement->rows;
   if( $rows < 1 ) {
-    print "[fatal] At gene $geneName recursionLevel $recursionLevel No rows at ORDER by part \n";
+    print "[fatal] At feature $geneName recursionLevel $recursionLevel No rows at ORDER by part \n";
     $returnThis = -1;
   } 
   # save row in a hash
@@ -269,16 +310,29 @@ sub searchBestBLAST6Match{
   }else{
     if ( $recursionLevel < 5 ) {
       if ( $debug > 1) { print "[notice] For $geneName $thisRecursionFeaturedColumn  $thisRecursionFeaturedValue is still not enough. Leveling up...\n"; }
-      $returnThis = searchBestBLAST6Match( $recursionLevel + 1,  $geneName, \@previousValues, $sqlQuerySpecific, $_[4], $thisTempTable);
+      $returnThis = searchBestBLAST6Match(
+        $recursionLevel + 1,
+        $geneName,
+        \@previousValues,
+        $sqlQuerySpecific,
+        $_[4],
+        $thisTempTable,
+        $_[6],
+        $_[7],
+        $_[8],
+        $programTag
+      );
     }else{
-       # STill there are more results in the topmost criteria, return the top most
+      # STill there are more results in the topmost criteria, return the top most
       my $finalRef = $statement3->fetchrow_hashref();
-      if ( $debug > 1) { handle_message('WARNING', 'There are still more than one results in recursionLevel 5/max criterion. Returning ' . $finalRef->{ 'id' } . " for $geneName", ''); }
+      if ( $debug > 1) { 
+        handle_message('WARNING', 'There are still more than one results in recursionLevel 5/max criterion. Returning ' . $finalRef->{ 'id' } . " for $geneName", '');
+      }
       $returnThis = $finalRef->{ 'id' };
     }
   }
   # TRUNCATE ANY TABLE TEMPORARY
-  my $statement5 = $connection->prepare("TRUNCATE TABLE $thisTempTable ;");
+  my $statement5 = $connection->prepare("DELETE FROM $thisTempTable WHERE `run_id` = '$programTag';");
   $statement5->execute()  || print "$DBI::errstr \n";;
   return $returnThis;
 }#sub

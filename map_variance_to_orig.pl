@@ -6,8 +6,8 @@
   origin/base genome. Takes in variances (SNPs only for now) in VCF format, gets its nearby X sequences
   to the left and right and these are BLAST-ed into the original genome.
   
-  Best hit is selcted and the sequence is reduced again to just one base pair to infer the location in
-  new genome.
+  Best hit is selcted and the sequence is reduced again to just one base pair (SNPs only for now ) to
+  infer the location in new genome.
 =cut
 
 use warnings;
@@ -35,8 +35,9 @@ use lib '.';
 # Contains general functions for output handling, etc.
 use generalUtilities;
 # Contains the activity-centric common subroutines. Make sure, it is always synced with 
-#   https://github.com/abrahamdsl/blast_and_infer_subfeatures/blob/master/InferAnnotationUtilities.pm
+# https://github.com/abrahamdsl/blast_and_infer_subfeatures/blob/master/InferAnnotationUtilities.pm
 use InferAnnotationUtilities;
+# For BLAST activities
 use Blast6BestResultsUtilities;
 
 # Debugging levels
@@ -71,6 +72,11 @@ my $endBuffer = 100;
 # Indicator if user wants to run the program just for help.
 my $help;
 
+# If set to 1, warns if the new target locus does not match via regex, the original locus of the
+# submitted annotation/$fascistAnnotation.
+# Test case: Chr01 in Chr01_genometitle_programtitlev99
+my $detectMismatch = 1;
+
 # New source to specify, for the new data to be generated. Dot as default.
 my $newSourceName = '.';
 
@@ -98,10 +104,14 @@ my %fascistFeatures;
 
 # The ultimate file we want
 my $finalOutputFileName;
+my $finalOutput_fileHandle;
 
 # Counters, in loops
 my $ax;
 my $bx;
+
+# Take note variables...
+my $probableLocusMismatch = 0;
 
 # start procedures ...
 splash();
@@ -116,7 +126,11 @@ $opt_success = GetOptions(
   'endbuffer=s' => \$endBuffer,
   'debug=s' => \$debug,
   'dsn=s' =>\$databaseName,
-  'newsource=s' => \$newSourceName 
+  'dbhost=s' => \$databaseHost,
+  'dbuser=s' => \$databaseUsername,
+  'dbpass=s' => \$databasePassword,
+  'detectmismatch=i' => \$detectMismatch,
+  'newsource=s' => \$newSourceName
 );
 die guide() if ( $help || ! $opt_success );
 $benchmark_grandStart = new Benchmark;
@@ -141,11 +155,15 @@ if ( isGFF3File( $fascismAnnotation ) ) {
 }else{
    handle_message( 'DEBUG', 'debug', "$fascismAnnotation is not GFF3. Might be internal" );
    %fascistFeatures =  loadInternalVK_SIMP_1( $fascismAnnotation ) ;
-#   hanlde_message( 'FATAL', 'debug', "Sorry, $fascismAnnotation needs to be GFF3. Please run the accompanying conversion tool." );
 }
 
 # Load new genome, without its annotation, it's not that important anyway
 $fascismDBHandle = loadBioDBSeqFeature( $fascism, '' );
+
+# Determine out final output filename
+( my $sourceAnnotSansExt = $fascismAnnotation ) =~ s/\.\w+$//; # remove last extension
+my @tempx = split( /\//, $sourceAnnotSansExt );
+$finalOutputFileName = $tempx[ scalar( @tempx ) - 1 ] . ".variance-mapped_run-$programTag.gff3";
 
 # Now iterate throughout each variance
 $ax = 0;
@@ -156,8 +174,27 @@ $bx = scalar( @aliciaKeys );
 my $blastDBIndexCMD = 'makeblastdb -dbtype nucl -in ';
 my $blastCommand = "blastn -task blastn -num_threads 8 -outfmt 6 ";
 my $searchProperLoopSecs = 0;
+
+# Open our final output handle
+handle_message( 'NOTICE', 'File Open', "Opening final output file $finalOutputFileName ..." );
+open ( $finalOutput_fileHandle, "> $finalOutputFileName" ) or
+  handle_message(
+    'FATAL',
+    'File open error',
+    "Cannot open $finalOutput_fileHandle for outputting of final GFF3 output"
+  );
+# Some headers
+print $finalOutput_fileHandle "##gff-version 3\n";
+print $finalOutput_fileHandle "# Generated " . localtime() . " via https://github.com/abrahamdsl/map_variance_in_new_to_orig_genome \n";
+print $finalOutput_fileHandle "# Sourced from $fascismAnnotation\n";
+print $finalOutput_fileHandle "#\n";
+
 foreach my $hashKey ( sort keys %fascistFeatures ) {
   my %bestResult;
+
+  # The line to be written on the GFF file.
+  my $finalGFFLine = "";
+  
   my %thisVariance = %{ $fascistFeatures{ $hashKey } };
   my $thisVarianceBLASTfile; 
   my $thisVarianceFeatureID;
@@ -183,7 +220,6 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
 
   $seqStart =  $thisVariance{ 'pos' } - ( $endBuffer - 1 );
   if ( $seqStart < 0 ) { $seqStart = 0 };
-
   
   # We don't know yet how to check if this exceeds length of target (chromosome)
   $seqEnd = ( $varianceType eq 'INDEL'  ) ?  $thisVariance{ 'pos2' }
@@ -222,7 +258,7 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
 
   # now index
   if ( execCommandEx(
-      $blastDBIndexCMD . ' ' . $thisVarianceFASTA,
+      $blastDBIndexCMD . ' ' . $thisVarianceFASTA . ' > /dev/null',
       "Indexing FASTA for $thisVarianceFASTA",
       "Something went wrong with BLAST indexing"
     ) != 0
@@ -256,7 +292,11 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
     $thisVarianceFeatureID,
     0,
     $databaseName,
-    $blast6Table
+    $blast6Table,
+    $databaseUsername,
+    $databasePassword,
+    $databaseHost,
+    $programTag
   );  
   
   if ( ! keys %bestResult ) {
@@ -281,60 +321,73 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
 
       # Now, generate GFF3 for that
       my $origSeq  =  $communismDBHandle->fetch_sequence(
-    -seq_id =>  $bestResult{ 'target' },
-    -start => $bestResult{ 'target_start' },
-    -end =>   $bestResult{ 'target_end' }
-  );
-     my $snpx = $blastThisSeq = $communismDBHandle->fetch_sequence(
-    -seq_id =>  $bestResult{ 'target' },
-  -start => $inferredStart,
-  -end => $inferredEnd
-     );
-     my $snp_len =  length( $snpx );
-     if( $snp_len > 1 or $snp_len == 0 ) {
-       print '[error] Top BLAST match for ' . $thisVarianceFeatureID . ' not a SNP! ' . "\n";
-       #next;
+        -seq_id =>  $bestResult{ 'target' },
+        -start => $bestResult{ 'target_start' },
+        -end =>   $bestResult{ 'target_end' }
+      );
+      my $snpx = $blastThisSeq = $communismDBHandle->fetch_sequence(
+        -seq_id =>  $bestResult{ 'target' },
+        -start => $inferredStart,
+        -end => $inferredEnd
+      );
+      my $snp_len =  length( $snpx );
+      if( $snp_len > 1 or $snp_len == 0 ) {
+        # We only handle SNPs for now
+        handle_message(
+          'ERROR',
+          'BLAST Error',
+          "Top BLAST match for $thisVarianceFeatureID not a SNP!"
+        );
       }else{
-      print '[result] seq=' . ( ( lc($blastThisSeq) eq lc($origSeq) ) ? "eq" : "ne" ) . ' snp=' . ( ( uc($snpx) eq uc( $thisVariance{ 'change' })  )  ?  "no" : "yes" )    .  ' ' . $thisVariance{ 'orig' } . '>' .  $thisVariance{ 'change' } . ' ? ' . $snpx . "\n";
+        if ( $detectMismatch == 1 ) {
+	  my $quotemetaedx = quotemeta( $bestResult{ 'target' } );
+	  if ( $thisVariance{ 'target' } !~ /$quotemetaedx/ ) {
+	    handle_message(
+	      'WARNING',
+	      'Probable locus mismatch',
+	      'Orig ' .  $thisVariance{ 'target' } . ' does not match new target ' . $bestResult{ 'target' } 
+	    );
+            $probableLocusMismatch++;
+	  }
+        }
+#debug      print '[result] seq=' . ( ( lc($blastThisSeq) eq lc($origSeq) ) ? "eq" : "ne" ) . ' snp=' . ( ( uc($snpx) eq uc( $thisVariance{ 'change' })  )  ?  "no" : "yes" )    .  ' ' . $thisVariance{ 'orig' } . '>' .  $thisVariance{ 'change' } . ' ? ' . $snpx . "\n";
 
-      print '[gff3] ' .    $bestResult{ 'target' } . "\t<source>\tSNP\t" .  $inferredStart . "\t" . $inferredEnd ;
-      print "\t<score>\t<strand>\t<phase>\tID=$thisVarianceFeatureID;Name=$thisVarianceFeatureID;Note=$snpx > " . $thisVariance{ 'change' }  ;
-      print ", AF ";
-      printf("%.2f\n",  $thisVariance{ 'af' } );
-# $thisVariance{ 'pos' } . ' ' .  $thisVariance{ 'orig' } ;
-#      print ' ' .  $bestResult{ 'target' } . " " . $bestResult{ 'target_start' } . " " . $bestResult{ 'target_end' } . "\n";
+        # Compose the final GFF3 lines
+        $finalGFFLine = $bestResult{ 'target' } . "\t$newSourceName\tSNP\t" .  $inferredStart . "\t" . $inferredEnd;
+        $finalGFFLine .= "\t" .  $bestResult{ 'evalue' }  ."\t+\t.\t";
+        $finalGFFLine .= "ID=$thisVarianceFeatureID;Name=$thisVarianceFeatureID;Note=$snpx > " . $thisVariance{ 'change' }  ;
+        $finalGFFLine .= ", AF ";
+        $finalGFFLine .= sprintf("%.2f\n",  $thisVariance{ 'af' } );
+#        $finalGFFLine .= ",ORIG " . $thisVariance{ 'target' } . "\n";
+        if ( $debug >= 3 ) { print "[gff3] $finalGFFLine"; }
+        print $finalOutput_fileHandle $finalGFFLine;
+        deleteBlastnRelatedFA( $thisVarianceFASTA );
+      }
+    } 
+    # Benchmarking matters
+    my $end_time = new Benchmark;
+    my $difference = timediff( $end_time, $start_time );
+    my $timeNotif =  "[debug] All processes for gene " . $thisVarianceFeatureID . " took " . timestr( $difference ) . "\n"; 
+    $timeNotif =~ /\s+(\d+)\s+wallclock\s+secs/;
+    $searchProperLoopSecs += $1;
+    $averageTimeSoFar = ( $searchProperLoopSecs / $ax );
+    $remainingTimeSoFar = ( $averageTimeSoFar * ( $bx - $ax ) );
+    if ( $debug > 0 ) { 
+      my $dt = DateTime->now();
+      my $expectedArrival = $dt->add( seconds => $remainingTimeSoFar );
+      print $timeNotif;
+      handle_message(
+        'DEBUG',
+        'Benchmark',
+        "$ax features took $searchProperLoopSecs for an average of $averageTimeSoFar. Estimated arrival at " . $expectedArrival->datetime() . "\n"
+      );
     }
-  } 
-#=doc 
-  my $end_time = new Benchmark;
-  my $difference = timediff( $end_time, $start_time );
-  my $timeNotif =  "[debug] All processes for gene " . $thisVarianceFeatureID . " took " . timestr( $difference ) . "\n"; 
-  $timeNotif =~ /\s+(\d+)\s+wallclock\s+secs/;
-  $searchProperLoopSecs += $1;
-  $averageTimeSoFar = ( $searchProperLoopSecs / $ax );
-  $remainingTimeSoFar = ( $averageTimeSoFar * ( $bx - $ax ) );
-  if ( $debug > 0 ) { 
-   my $dt = DateTime->now();
-   my $expectedArrival = $dt->add( seconds => $remainingTimeSoFar );
-   print $timeNotif;
-   print "[debug] $ax features took $searchProperLoopSecs for an average of $averageTimeSoFar. Estimated arrival at " . $expectedArrival->datetime() . "\n" ;
-  }
-#=cut
-  }
-} # sub
-
-##test code START
-=doc
-my @communismGenes = $communismDBHandle->get_features_by_type('gene');
-my ($temp_arr_ref2, $queryHashRef2) = convert_BioDBSeqFeature_To_Hash( \@communismGenes, 1 );
-my %queryFeaturesFast2 = %$queryHashRef2;
-my @queryFeatureKeys2 = @$temp_arr_ref2;
-foreach my $hashKey (@queryFeatureKeys2) {
-  my $obj = $queryFeaturesFast2{ $hashKey };
-  print $obj->name . "\n";
+  } # ???
+} # main for loop
+if( $probableLocusMismatch > 0 ) {
+  handle_message('NOTICE','End notice', "There might be $probableLocusMismatch probable locus mismatches.");
 }
-=cut
-##test code END
+handle_message( 'NOTICE', 'Finished', 'Program finished.' );
 
 #
 # end of main, start of subroutines
@@ -364,15 +417,33 @@ sub constructFeatureID {
   }
 } # sub
 
+sub deleteBlastnRelatedFA {
+=doc
+  Deletes the 3 other files created by blast when indexing a fasta file, for the feature in question.
+
+  Arguments:
+   0 - string. Required. The filename of the feature's FASTA file.
+=cut
+
+  if ( execCommandEx(
+      "rm $_[0].n*",
+       "Deleting associated files of $_[0] ", " Deletion fail."
+    ) != 0
+  ) {
+     handle_message( 'FATAL', 'Cleanup error', 'Something went wrong with deletion.' );
+     return -1;
+  }
+} #deleteBlastn...
+
 sub execCommandEx {
 =doc
   @devnote Sourced from https://raw.githubusercontent.com/abrahamdsl/blast_and_infer_subfeatures/master/blast_and_infer_genes_and_subfeatures.pl
   A subroutine to execute outside programs.
 
   Arguments:
-  0 - string. Required. The command (and arguments to execute).
-  1 - string. Required. Message to output upon start of execution.
-  2 - string. Optional. Message to output upon execution error.
+    0 - string. Required. The command (and arguments to execute).
+    1 - string. Required. Message to output upon start of execution.
+    2 - string. Optional. Message to output upon execution error.
 =cut
  my $pidx;
  my $executeCommand = $_[0];
@@ -444,17 +515,22 @@ sub guide {
   $0 [options]
 
   Options:
-  --blasttb    Optional. The table within --dsn to store blast 6 results. Default `blast6out`.
-  --endbuffer  Optional. Number of extra bases to include from left and end of gene sequence in original. Default $endBuffer.
-  --string_tag Required. A string of minlength 1 to describe the GFF3-able data that will be generated.
-  --genome1    Required. The original genome, in FASTA format.
-  --genome2    Required. The newly created genome (the one you're generating a new annotation for), in FASTA format.
-  --gff1       Required. The GFF3 for --genome1. The subfeatures are required too. As in, complete.
-  --gff2       Required. For --genome2.
-                 Can be GFF3 or internal format ( insider tag: VK_SIMP_1 )
-  --dsn        Required. The MySQL database name for BLAST 6 results filtering.
-  --newsource  Optional. Specify if we have to have a new source to be put in the GFF3 column 2 (1-based indexing).
-                 If not specified, uses the original source as specified in --gff1
+  --blasttb        Optional. The table within --dsn to store blast 6 results. Default `blast6out`.
+  --endbuffer      Optional. Number of extra bases to include from left and end of gene sequence in original. Default $endBuffer.
+  --string_tag     Required. A string of minlength 1 to describe the GFF3-able data that will be generated.
+  --genome1        Required. The original genome, in FASTA format.
+  --genome2        Required. The newly created genome (the one you're generating a new annotation for), in FASTA format.
+  --gff1           Required. The GFF3 for --genome1. The subfeatures are required too. As in, complete.
+  --gff2           Required. For --genome2.
+                     Can be GFF3 or internal format ( insider tag: VK_SIMP_1 )
+  --dsn            Required. The MySQL database name for BLAST 6 results filtering.
+  --dbuser         Required. The user for --dsn
+  --dbpass         Required. The password for --dbuser
+  --dbhost         Optional. The host for --dsn, --dbuser and --dbpass. Default 'localhost'
+  --detectmismatch Optional. Check via regex if the detected new location's target/locus matches that of the original. 
+                     Ex. \"Chr01\" in \"Chr01_xxx_yyyyv10\". Default 1 ( TRUE ). Set to 0 for FALSE.
+  --newsource      Optional. Specify if we have to have a new source to be put in the GFF3 column 2 (1-based indexing).
+                   If not specified, uses the original source as specified in --gff1
 
   Ex: $0 --endbuffer=100 -string_tag=rand --dsn=taskXXX ...
   ";

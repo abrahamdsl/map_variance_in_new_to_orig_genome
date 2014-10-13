@@ -13,17 +13,20 @@ sub ConnectToMySql {
   Used for connecting to MySQL database.
   Disclaimer: This function was sourced from somewhere else, I forgot where. All credits go to
   original poster.
-  Arguments
-  0 - database name
-  Returns
-  DBI object for MySQL connection.
-=cut
-  my ($db) = @_;
 
+  Arguments
+    0 - database name
+    1 - user name
+    2 - password
+    3 - host
+    port? Coming soon    
+
+  Returns
+    DBI object for MySQL connection.
+=cut
   # assign the values in the accessDB file to the variables
-  my $host = "localhost";
-  my $userid = "root";
-  my $passwd = "e\$nodenpri\$m";
+  my ($db, $userid, $passwd, $host) = @_;
+
   # assign the values to your connection variable
   my $connectionInfo="dbi:mysql:$db;$host";
   # make connection to database
