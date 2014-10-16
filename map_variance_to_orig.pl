@@ -87,6 +87,11 @@ my $opt_success;
 # generator sourced from http://stackoverflow.com/questions/801347/how-should-i-generate-a-random-alphanumeric-initial-password-for-new-users
 my $programTag = join '', map +(0..9,'A'..'Z')[rand(10+26*2)], 1..8;
 
+# Used for argument, you can tell the program to skip processing first n lines
+# Useful if for some reason, program stops working or crashes due to OS issues,
+# so you don't have to start from start again. ( LOLWHUT? )
+my $startAt = -1;
+
 # The original genome and its related variables.
 my $communism;
 my $communismHandle;
@@ -130,7 +135,8 @@ $opt_success = GetOptions(
   'dbuser=s' => \$databaseUsername,
   'dbpass=s' => \$databasePassword,
   'detectmismatch=i' => \$detectMismatch,
-  'newsource=s' => \$newSourceName
+  'newsource=s' => \$newSourceName,
+  'start=i' => \$startAt
 );
 die guide() if ( $help || ! $opt_success );
 $benchmark_grandStart = new Benchmark;
@@ -142,6 +148,9 @@ handle_message( 'FATAL', 'cannot_open_file', $fascism ) unless  open( $fascismHa
 handle_message( 'NOTICE', 'File Open', "Opening gff1 : $communismGFF ...");
 handle_message( 'FATAL', 'cannot_open_file', $communismGFF ) unless open( $communismGFFHandle, $communismGFF );
 handle_message( 'NOTICE', 'File Open', "Opening gff2 : $fascismAnnotation ...");
+if( $startAt > -1 ) {
+  handle_message('NOTICE','Skipping','Processing will start at line ' . $startAt );
+}
 handle_message( 'FATAL', 'cannot_open_file', $fascismAnnotation ) unless  open( $fascismAnnotationHandle, $fascismAnnotation );
 
 # Load original genome and its annotation
@@ -216,6 +225,22 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   print "[notice] " . localtime() . " Progress " . ($ax + 1) . " \/ $bx " . (($ax+1)/$bx) * 100 ;
   if ($debug > 0) { print "\n"; }else{ print "\r" };
 
+  # If $startAt argument was specified, skip $startAt lines
+  if( $startAt > -1 ) {
+    if ( $ax != $startAt-1 ) {
+      if ( $debug > 1 ) {
+        handle_message('DEBUG','Skipping','Line ' . ($ax + 1) . ' skipped' );
+      }
+      $ax++;   #one of the increments here, there's another one down the road, if this
+               # is not reached
+      next;
+    }else{
+      # we have reached the specified start line, reset this variable so this if statement
+      # won't be executed
+      $startAt = -1; 
+    }
+  }
+
   $varianceType = ( exists( $thisVariance{ 'pos2' } ) ) ? 'INDEL' : 'SNP';
 
   $seqStart =  $thisVariance{ 'pos' } - ( $endBuffer - 1 );
@@ -249,7 +274,7 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   # Now write to file
   if (  writeSingleFASTA(
      $thisVarianceFASTA,
-     $thisVarianceFeatureID,
+     $thisVarianceFeatureID . " " . $thisVariance{ 'target' } . ":" . $seqStart . "-" . $seqEnd,
      $blastThisSeq     
     ) != 0
   ) {
@@ -531,8 +556,10 @@ sub guide {
                      Ex. \"Chr01\" in \"Chr01_xxx_yyyyv10\". Default 1 ( TRUE ). Set to 0 for FALSE.
   --newsource      Optional. Specify if we have to have a new source to be put in the GFF3 column 2 (1-based indexing).
                    If not specified, uses the original source as specified in --gff1
+  --start          Optional. The line number of -gff2 to start processing. Useful if program suddenly terminated on  a previous
+                     run and you don't wanna start from top again.
 
-  Ex: $0 --endbuffer=100 -string_tag=rand --dsn=taskXXX ...
+  Ex: $0 --endbuffer=100 -string_tag=rand --dsn=taskXXX --start=2402 ...
   ";
 } # sub
 
