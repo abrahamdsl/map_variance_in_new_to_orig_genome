@@ -73,23 +73,30 @@ sub insertBLAST6ToMySQL {
   $statement->execute();
   foreach my $lineNum ( sort keys %resultsHash ) {
     my %localHash = %{  $resultsHash{ $lineNum } };
-    $statement = $connection->prepare( $query );
-    $statement->execute(
-      $_[6],
-      $lineNum,
-      $localHash{ 'query_label' },
-      $localHash{ 'target' },
-      $localHash{ 'percent_identity' },
-      $localHash{ 'alignment_length' },
-      $localHash{ 'mismatch' },
-      $localHash{ 'gap' },
-      $localHash{ 'query_start' },
-      $localHash{ 'query_end' },
-      $localHash{ 'target_start' },
-      $localHash{ 'target_end' },
-      $localHash{ 'evalue' },
-      $localHash{ 'bitscore' }
-    )  || print "$DBI::errstr \n" ;
+    if( exists( $localHash{ 'chr_mismatch_indicator' }  ) ) {
+      # The BLAST result for this line in the results file is crossed out as it does not match
+      # the chromosome we are targeting.
+#      handle_message( 'DEBUG', 'chr_mismatch_indicator present', "$0:insertBLAST6ToMySQL  chromosome mismatch check present, skipping line" ); 
+      next;
+    }else{
+      $statement = $connection->prepare( $query );
+      $statement->execute(
+	$_[6],
+	$lineNum,
+	$localHash{ 'query_label' },
+	$localHash{ 'target' },
+	$localHash{ 'percent_identity' },
+	$localHash{ 'alignment_length' },
+	$localHash{ 'mismatch' },
+	$localHash{ 'gap' },
+	$localHash{ 'query_start' },
+	$localHash{ 'query_end' },
+	$localHash{ 'target_start' },
+	$localHash{ 'target_end' },
+	$localHash{ 'evalue' },
+	$localHash{ 'bitscore' }
+      )  || print "$DBI::errstr \n" ;
+    }
   }
 } # sub insertBLAST6ToMySQL
 
@@ -110,9 +117,12 @@ sub parseBLAST6Results {
     6 - string. The password for arg 3.
     7 - string. The hostname for arg 3.
     8 - string. Program Run ID
-
+    9 - string. Chromosome to loosely match via regex, with the BLAST results, to avoid mismatch of chromosomes.
+          If not needed, and by default ''.
   Returns:
     Hash accessed by BLAST6/Table labels
+      If "anti-chromosome mismatch" is enabled by supplying orig chromosome of feature in question in parameter 9 (0-index)
+        then, the key of the hash contains only a hash whose only key is 'chr_mismatch_indicator'
 
     Special note, the 'target_start' and 'target_end' are both assigned the following values as per
       the description:
@@ -125,6 +135,7 @@ sub parseBLAST6Results {
   my $lineCount = getFileNumLines( $_[0] );
   my $featureName = $_[1];
   my $timesCalled = $_[2]; 
+  my $origChromosome = $_[9];
 
 # Is result just one line?
   if ( $lineCount == 1 ) {
@@ -147,6 +158,28 @@ sub parseBLAST6Results {
     # scan matches and put into hash
     open( my $fileHandle, $_[0] ) or die( handle_message('ERROR', "Can't open $_[0] for processing.", '') );
     while ( <$fileHandle> ) {
+       # Here we check for mismatch chromosome in BLAST results, if caller specified.
+       # So far I think, this needs editing, the chromosome name length in the original genome being mapped to should
+       # be lesser than the new one.
+       # Ex: Original: Chr02
+       #     New: Chr02_pilonv9
+       if( $origChromosome ne '' ) {
+         chomp $_;
+         # Find the second word from beginning of line. In BLATS output format 6, that's where the chromosome is.
+         $_ =~ /^\S+\s+(\S+)/;
+         my $new_genome_chr = $1;
+         my $quotemetaed_blastresult_target = quotemeta( $new_genome_chr ); # quotemeta the matched from earlier line ( first word from start of line -  a chromosome perhaps )
+#         handle_message( 'DEBUG', 'Mismatch chromosome check', $featureName . ' quotemetaed ' . $new_genome_chr . ' orig ' . $origChromosome );
+         if ( $origChromosome !~ $quotemetaed_blastresult_target ) {
+           if ( $debug > 1 ) {
+             handle_message( 'NOTICE', 'Mismatch chromosome excluded for ' . $featureName, 'BLAST Result #' . ( $x + 1 ) . ' excluded due to chromosome mismatch' );
+           }
+           $theResults{ $x }{ 'chr_mismatch_indicator' } = -10  ;  # mismatch chromosome code 
+           $x++;
+           next;
+           
+         }
+       }
        $theResults{ $x++ } = buildBLAST6LineHash( $_ );
     }
     close( $fileHandle );

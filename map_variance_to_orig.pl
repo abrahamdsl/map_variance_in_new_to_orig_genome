@@ -91,6 +91,8 @@ my $programTag = join '', map +(0..9,'A'..'Z')[rand(10+26*2)], 1..8;
 # Useful if for some reason, program stops working or crashes due to OS issues,
 # so you don't have to start from start again. ( LOLWHUT? )
 my $startAt = -1;
+# Same as previous but maybe there will be times you need to only process a select contiguous section ...
+my $endAt = -1;
 
 # The original genome and its related variables.
 my $communism;
@@ -136,7 +138,8 @@ $opt_success = GetOptions(
   'dbpass=s' => \$databasePassword,
   'detectmismatch=i' => \$detectMismatch,
   'newsource=s' => \$newSourceName,
-  'start=i' => \$startAt
+  'start=i' => \$startAt,
+  'end=i' => \$endAt
 );
 die guide() if ( $help || ! $opt_success );
 $benchmark_grandStart = new Benchmark;
@@ -149,7 +152,13 @@ handle_message( 'NOTICE', 'File Open', "Opening gff1 : $communismGFF ...");
 handle_message( 'FATAL', 'cannot_open_file', $communismGFF ) unless open( $communismGFFHandle, $communismGFF );
 handle_message( 'NOTICE', 'File Open', "Opening gff2 : $fascismAnnotation ...");
 if( $startAt > -1 ) {
-  handle_message('NOTICE','Skipping','Processing will start at line ' . $startAt );
+  handle_message( 'NOTICE','Skipping','Processing will start at line ' . $startAt );
+}
+if( $endAt > -1 ) {
+  handle_message( 'NOTICE','Skipping','Processing will end at line ' . $endAt );
+  if( $endAt < $startAt ) {
+    handle_message( 'FATAL', 'Incorrect parameters', '--start should be greater or equal to --end' );
+  }
 }
 handle_message( 'FATAL', 'cannot_open_file', $fascismAnnotation ) unless  open( $fascismAnnotationHandle, $fascismAnnotation );
 
@@ -178,11 +187,25 @@ $finalOutputFileName = $tempx[ scalar( @tempx ) - 1 ] . ".variance-mapped_run-$p
 $ax = 0;
 my $averageTimeSoFar = 0;
 my $remainingTimeSoFar=0;
-my @aliciaKeys = sort keys %fascistFeatures;
-$bx = scalar( @aliciaKeys );
+my @aliciaKeys = sort { $a <=> $b } keys %fascistFeatures;
 my $blastDBIndexCMD = 'makeblastdb -dbtype nucl -in ';
 my $blastCommand = "blastn -task blastn -num_threads 8 -outfmt 6 ";
 my $searchProperLoopSecs = 0;
+my $processedCountSoFar = 0;
+
+# For area selection logic
+if ( $startAt == -1 and $endAt == -1 ) {
+  $bx = scalar( @aliciaKeys ) ;
+}else{
+  if( $startAt > 0 ) {
+    if( $endAt == -1 ) {
+      $bx = scalar( @aliciaKeys ) ;
+      $bx = $bx - $startAt;
+    }else{
+      $bx = $endAt - $startAt;
+    }
+  }
+}
 
 # Open our final output handle
 handle_message( 'NOTICE', 'File Open', "Opening final output file $finalOutputFileName ..." );
@@ -198,7 +221,7 @@ print $finalOutput_fileHandle "# Generated " . localtime() . " via https://githu
 print $finalOutput_fileHandle "# Sourced from $fascismAnnotation\n";
 print $finalOutput_fileHandle "#\n";
 
-foreach my $hashKey ( sort keys %fascistFeatures ) {
+foreach my $hashKey ( @aliciaKeys ) {
   my %bestResult;
 
   # The line to be written on the GFF file.
@@ -210,7 +233,7 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   my $thisVarianceFASTA;
   my $varianceType; 
   my $start_time = new Benchmark;
-#debug  print Dumper %thisVariance;
+
   # The x-1 to the left and x+ to the right base pairs/sequence of this variance
   my $blastThisSeq;
   
@@ -222,15 +245,15 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
   my $inferredStart;
   my $inferredEnd;
 
-  print "[notice] " . localtime() . " Progress " . ($ax + 1) . " \/ $bx " . (($ax+1)/$bx) * 100 ;
+  print "[notice] " . localtime() . " Progress " . ($processedCountSoFar + 1) . " \/ $bx " . (($processedCountSoFar+1)/$bx) * 100 ;
   if ($debug > 0) { print "\n"; }else{ print "\r" };
 
   # If $startAt argument was specified, skip $startAt lines
   if( $startAt > -1 ) {
     if ( $ax != $startAt-1 ) {
-      if ( $debug > 1 ) {
-        handle_message('DEBUG','Skipping','Line ' . ($ax + 1) . ' skipped' );
-      }
+#      if ( $debug > 1 ) {
+#        handle_message('DEBUG','Skipping','Line ' . ($ax + 1) . ' skipped' );
+#      }
       $ax++;   #one of the increments here, there's another one down the road, if this
                # is not reached
       next;
@@ -241,14 +264,17 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
     }
   }
 
-  $varianceType = ( exists( $thisVariance{ 'pos2' } ) ) ? 'INDEL' : 'SNP';
+  # earlier is for deletion then latter is for insertion
+  $varianceType = ( exists( $thisVariance{ 'pos2'} ) or length( $thisVariance{ 'change' } ) > 1 ) ? 'INDEL' : 'SNP';
 
   $seqStart =  $thisVariance{ 'pos' } - ( $endBuffer - 1 );
   if ( $seqStart < 0 ) { $seqStart = 0 };
   
-  # We don't know yet how to check if this exceeds length of target (chromosome)
-  $seqEnd = ( $varianceType eq 'INDEL'  ) ?  $thisVariance{ 'pos2' }
-    : $thisVariance{ 'pos' } + $endBuffer;
+  # REMINDER: We don't know yet how to check if this exceeds length of target (chromosome)
+  # The earlier condition is if a DELETION, we adjust the end point, just before the start of end buffer
+  # For SNPs and INSERTIONs, the latter case applies.
+  $seqEnd = ( exists( $thisVariance{ 'pos2'} ) ) ?  $thisVariance{ 'pos2'}  :  $thisVariance{ 'pos' };
+  $seqEnd += $endBuffer;
 
   # Time to retrieve sequence 
   $blastThisSeq = $fascismDBHandle->fetch_sequence(
@@ -256,7 +282,6 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
     -start => $seqStart,
     -end =>  $seqEnd
   );
-#debug  print $blastThisSeq . "\t" .  $thisVariance{ 'target' } . "\t" . $seqStart . "\t" . $seqEnd . "\n";
   $ax++;
   
   # generate feature ID
@@ -321,7 +346,8 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
     $databaseUsername,
     $databasePassword,
     $databaseHost,
-    $programTag
+    $programTag,
+    $thisVariance{ 'target' }  
   );  
   
   if ( ! keys %bestResult ) {
@@ -341,10 +367,19 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
     }else{
       # We have a match yey!
       # Now restore to original
+      my $pos2_leeway = 0;
       $inferredStart = $bestResult{ 'target_start' } + ( $endBuffer - 1 );
       $inferredEnd = $bestResult{ 'target_end' } - $endBuffer;
+ 
+#on-hold 12dec2014    -1750
+      # If there's a deletion, adjust accordingly ..
+#      if( exists(  $thisVariance{ 'pos2' } ) ) {
+#        $pos2_leeway =  $thisVariance{ 'pos2' } -  $thisVariance{ 'pos' };
+#        $inferredEnd += $pos2_leeway;
+#      }     
 
       # Now, generate GFF3 for that
+      my $finalStrand = '+';
       my $origSeq  =  $communismDBHandle->fetch_sequence(
         -seq_id =>  $bestResult{ 'target' },
         -start => $bestResult{ 'target_start' },
@@ -356,35 +391,38 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
         -end => $inferredEnd
       );
       my $snp_len =  length( $snpx );
-      if( $snp_len > 1 or $snp_len == 0 ) {
-        # We only handle SNPs for now
+      if( $snp_len == 0 ) {
         handle_message(
           'ERROR',
           'BLAST Error',
-          "Top BLAST match for $thisVarianceFeatureID not a SNP!"
+          "Top BLAST match for $thisVarianceFeatureID zero length???"
         );
       }else{
+        if ( $inferredEnd < $inferredStart ) { $finalStrand = '-'; };
         if ( $detectMismatch == 1 ) {
 	  my $quotemetaedx = quotemeta( $bestResult{ 'target' } );
 	  if ( $thisVariance{ 'target' } !~ /$quotemetaedx/ ) {
 	    handle_message(
 	      'WARNING',
 	      'Probable locus mismatch',
-	      'Orig ' .  $thisVariance{ 'target' } . ' does not match new target ' . $bestResult{ 'target' } 
+	      'Orig ' .  $thisVariance{ 'target' } . " for $thisVarianceFeatureID  does not match new target " . $bestResult{ 'target' } 
 	    );
             $probableLocusMismatch++;
 	  }
         }
-#debug      print '[result] seq=' . ( ( lc($blastThisSeq) eq lc($origSeq) ) ? "eq" : "ne" ) . ' snp=' . ( ( uc($snpx) eq uc( $thisVariance{ 'change' })  )  ?  "no" : "yes" )    .  ' ' . $thisVariance{ 'orig' } . '>' .  $thisVariance{ 'change' } . ' ? ' . $snpx . "\n";
 
         # Compose the final GFF3 lines
-        $finalGFFLine = $bestResult{ 'target' } . "\t$newSourceName\tSNP\t" .  $inferredStart . "\t" . $inferredEnd;
-        $finalGFFLine .= "\t" .  $bestResult{ 'evalue' }  ."\t+\t.\t";
+        $finalGFFLine = $bestResult{ 'target' } . "\t$newSourceName\t$varianceType\t" .  $inferredStart . "\t" . $inferredEnd;
+        $finalGFFLine .= "\t" .  $bestResult{ 'evalue' }  ."\t$finalStrand\t.\t";
         $finalGFFLine .= "ID=$thisVarianceFeatureID;Name=$thisVarianceFeatureID;Note=$snpx > " . $thisVariance{ 'change' }  ;
+
+        if ( lc( $snpx ) ne lc(  $thisVariance{ 'orig' } ) ) {
+          $finalGFFLine .= ", map_mismatch=probable-00";
+        }
         $finalGFFLine .= ", AF ";
         $finalGFFLine .= sprintf("%.2f\n",  $thisVariance{ 'af' } );
-#        $finalGFFLine .= ",ORIG " . $thisVariance{ 'target' } . "\n";
-        if ( $debug >= 3 ) { print "[gff3] $finalGFFLine"; }
+
+ #       if ( $debug >= 3 ) { print "[gff3] $finalGFFLine"; }
         print $finalOutput_fileHandle $finalGFFLine;
         deleteBlastnRelatedFA( $thisVarianceFASTA );
       }
@@ -393,21 +431,35 @@ foreach my $hashKey ( sort keys %fascistFeatures ) {
     my $end_time = new Benchmark;
     my $difference = timediff( $end_time, $start_time );
     my $timeNotif =  "[debug] All processes for gene " . $thisVarianceFeatureID . " took " . timestr( $difference ) . "\n"; 
+    $processedCountSoFar++;
     $timeNotif =~ /\s+(\d+)\s+wallclock\s+secs/;
-    $searchProperLoopSecs += $1;
-    $averageTimeSoFar = ( $searchProperLoopSecs / $ax );
-    $remainingTimeSoFar = ( $averageTimeSoFar * ( $bx - $ax ) );
+    $searchProperLoopSecs += $1;    
+    $averageTimeSoFar = ( $searchProperLoopSecs / $processedCountSoFar );
+    $remainingTimeSoFar = ( $averageTimeSoFar * ( $bx - $processedCountSoFar  ) );
     if ( $debug > 0 ) { 
       my $dt = DateTime->now();
-      my $expectedArrival = $dt->add( seconds => $remainingTimeSoFar );
+      my $expectedArrival;
+      
+      $dt->set_time_zone( 'Asia/Manila' );
+      $expectedArrival = $dt->add( seconds => $remainingTimeSoFar );
       print $timeNotif;
       handle_message(
         'DEBUG',
         'Benchmark',
-        "$ax features took $searchProperLoopSecs for an average of $averageTimeSoFar. Estimated arrival at " . $expectedArrival->datetime() . "\n"
+        "$processedCountSoFar features took $searchProperLoopSecs for an average of $averageTimeSoFar. Estimated arrival at " . $expectedArrival->datetime() . "\n"
       );
     }
   } # ???
+
+   # Was 'end' parameter filled? If so, finish program.
+  if ( $endAt > -1 ) {
+    if ( $ax == $endAt ) {
+      if ( $debug > 0 ) {
+        handle_message('NOTICE', 'Segment end reached', "Line $endAt reached. As specified in paramemter 'end', now breaking.");
+      }
+      last;
+    }
+  }
 } # main for loop
 if( $probableLocusMismatch > 0 ) {
   handle_message('NOTICE','End notice', "There might be $probableLocusMismatch probable locus mismatches.");
@@ -449,6 +501,7 @@ sub deleteBlastnRelatedFA {
   Arguments:
    0 - string. Required. The filename of the feature's FASTA file.
 =cut
+
 
   if ( execCommandEx(
       "rm $_[0].n*",
@@ -631,6 +684,7 @@ sub loadInternalVK_SIMP_1 {
   my $fileHandle;
   my %hushHash;
   my $x = 0;
+  my $y;
 
   open ( $fileHandle, $_[0] ) or 
     handle_message( 'FATAL', 'File open error', "Error opening $_[0]. Program exiting." );
@@ -648,7 +702,13 @@ sub loadInternalVK_SIMP_1 {
       'orig' => $temparr[2],
       'change' => $temparr[3],
       'af' => $temparr[4]
-    } ;
+    };
+    # a deletion, so therefore you have to accordingly adjust end position when
+    # whebn retrieving bases from chromosome
+    $y =  length( $temparr[2] );
+    if( $y > 1 ) {
+      $hushHash{ $x }{ 'pos2' } =  $temparr[1] + (  $y - 1 );
+    }
     $x++;
   }
   close( $fileHandle );
